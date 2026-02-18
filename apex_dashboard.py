@@ -110,8 +110,9 @@ st.set_page_config(layout="wide")
 # API ENDPOINTS
 # ============================
 
-BYBIT_URL = "https://api.bytick.com/v5/market/tickers?category=linear"
-BTC_URL = "https://api.bytick.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
+BYBIT_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
+BTC_URL = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
+
 
 # ============================
 # SESSION STATE LOCK
