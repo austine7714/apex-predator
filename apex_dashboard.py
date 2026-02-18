@@ -16,7 +16,7 @@ CHAT_ID = "698628907"
 
 ALERT_FILE = "alerted_symbols.json"
 
-ALERT_COOLDOWN_HOURS = 4
+ALERT_COOLDOWN_HOURS = 1
 
 # ============================
 # SAFE JSON LOAD (PERMANENT FIX)
