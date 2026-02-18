@@ -1,4 +1,11 @@
 import streamlit as st
+
+st.title("APEX TERMINAL LOADED")
+
+st.write("If you see this, Streamlit is working.")
+
+
+import streamlit as st
 import requests
 import pandas as pd
 import json
