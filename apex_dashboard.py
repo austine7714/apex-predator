@@ -3,8 +3,12 @@ import requests
 import pandas as pd
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
+
+# =========================
+# CONFIG
+# =========================
 
 st.set_page_config(layout="wide")
 st.title("APEX PREDATOR TERMINAL")
@@ -13,6 +17,12 @@ BOT_TOKEN = "8334346794:AAE133CpkLqeTbuJhwmJcSUVvMlaQE77Lzg"
 CHAT_ID = "698628907"
 
 ALERT_FILE = "alerted_symbols.json"
+
+BINANCE_FUTURES = "https://fapi.binance.com"
+
+# =========================
+# ALERT STORAGE SAFE LOAD
+# =========================
 
 def load_alerts():
     if not os.path.exists(ALERT_FILE):
@@ -23,21 +33,34 @@ def load_alerts():
     except:
         return {}
 
-def save_alerts(alerts):
+def save_alerts(data):
     with open(ALERT_FILE, "w") as f:
-        json.dump(alerts, f)
+        json.dump(data, f)
 
 alerts = load_alerts()
 
-def send_telegram(symbol, score):
+# =========================
+# TELEGRAM ALERT
+# =========================
+
+def send_telegram(symbol, score, grade):
+
     if symbol in alerts:
         return
 
+    msg = (
+        f"APEX SIGNAL\n\n"
+        f"Symbol: {symbol}\n"
+        f"Grade: {grade}\n"
+        f"Apex Score: {score:.2f}"
+    )
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    msg = f"APEX SIGNAL\nSymbol: {symbol}\nScore: {score}"
-
-    payload = {"chat_id": CHAT_ID, "text": msg}
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg
+    }
 
     try:
         requests.post(url, data=payload)
@@ -46,39 +69,46 @@ def send_telegram(symbol, score):
     except:
         pass
 
+# =========================
+# AUTO REFRESH (NO DIMMING)
+# =========================
+
 st_autorefresh(interval=15000, key="refresh")
 
-# USE COINCAP FOR BTC (WORKS ON CLOUD)
+# =========================
+# BTC PRICE FROM BINANCE
+# =========================
 
 def get_btc():
-    try:
-        r = requests.get("https://api.coincap.io/v2/assets/bitcoin")
-        data = r.json()["data"]
 
-        price = float(data["priceUsd"])
-        change = float(data["changePercent24Hr"])
+    try:
+
+        r = requests.get(
+            f"{BINANCE_FUTURES}/fapi/v1/ticker/24hr",
+            params={"symbol": "BTCUSDT"}
+        )
+
+        data = r.json()
+
+        price = float(data["lastPrice"])
+        change = float(data["priceChangePercent"])
 
         return price, change
 
     except Exception as e:
-        st.error(f"BTC fetch error: {e}")
+
+        st.error(f"BTC error: {e}")
         return None, None
 
-# USE COINGECKO FOR MARKET DATA (WORKS ON CLOUD)
+# =========================
+# MARKET DATA FROM BINANCE
+# =========================
 
 def get_market():
 
     try:
 
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/coins/markets",
-            params={
-                "vs_currency": "usd",
-                "order": "volume_desc",
-                "per_page": 250,
-                "page": 1
-            }
-        )
+        r = requests.get(f"{BINANCE_FUTURES}/fapi/v1/ticker/24hr")
 
         data = r.json()
 
@@ -86,36 +116,56 @@ def get_market():
 
         for coin in data:
 
-            symbol = coin["symbol"].upper()
-            change = coin["price_change_percentage_24h"]
-            volume = coin["total_volume"]
+            symbol = coin["symbol"]
+
+            if not symbol.endswith("USDT"):
+                continue
+
+            volume = float(coin["quoteVolume"])
+            change = float(coin["priceChangePercent"])
 
             lag_score = volume / (abs(change) + 1)
 
             rows.append({
                 "Symbol": symbol,
-                "Change %": round(change, 2),
+                "Change %": change,
                 "Volume": volume,
                 "Lag Score": lag_score
             })
 
         df = pd.DataFrame(rows)
 
+        # Apex Score normalization
         df["Apex Score"] = (
             (df["Lag Score"] - df["Lag Score"].min())
-            / (df["Lag Score"].max() - df["Lag Score"].min())
+            /
+            (df["Lag Score"].max() - df["Lag Score"].min())
         ) * 100
 
-        df["Grade"] = df["Apex Score"].apply(
-            lambda x: "A+" if x >= 80 else "A" if x >= 60 else "B"
-        )
+        # Grade logic
+        def grade(score):
+
+            if score >= 85:
+                return "A+"
+            elif score >= 70:
+                return "A"
+            elif score >= 55:
+                return "B"
+            else:
+                return "C"
+
+        df["Grade"] = df["Apex Score"].apply(grade)
 
         return df.sort_values("Apex Score", ascending=False)
 
     except Exception as e:
 
-        st.error(f"Market fetch error: {e}")
+        st.error(f"Market error: {e}")
         return pd.DataFrame()
+
+# =========================
+# DISPLAY BTC
+# =========================
 
 btc_price, btc_change = get_btc()
 
@@ -128,20 +178,29 @@ if btc_price:
         unsafe_allow_html=True
     )
 
+# =========================
+# DISPLAY MARKET
+# =========================
+
 df = get_market()
 
-if not df.empty:
+if df.empty:
 
-    top = df.head(10)
-
-    st.subheader("Top Apex Opportunities")
-    st.dataframe(top)
-
-    for _, row in top.iterrows():
-
-        if row["Grade"] == "A+":
-            send_telegram(row["Symbol"], row["Apex Score"])
+    st.warning("No market data")
 
 else:
 
-    st.warning("Market data unavailable")
+    top = df.head(25)
+
+    st.subheader("Apex Lag Leaderboard")
+    st.dataframe(top, use_container_width=True)
+
+    # TELEGRAM ALERT ONLY A+
+    for _, row in top.iterrows():
+
+        if row["Grade"] == "A+":
+            send_telegram(
+                row["Symbol"],
+                row["Apex Score"],
+                row["Grade"]
+            )
