@@ -6,108 +6,57 @@ import os
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 
-# ============================================
-# BASIC UI INIT (always render something)
-# ============================================
-
 st.set_page_config(layout="wide")
 st.title("APEX PREDATOR TERMINAL")
-
-# ============================================
-# TELEGRAM SETTINGS
-# ============================================
 
 BOT_TOKEN = "8334346794:AAE133CpkLqeTbuJhwmJcSUVvMlaQE77Lzg"
 CHAT_ID = "698628907"
 
 ALERT_FILE = "alerted_symbols.json"
-ALERT_COOLDOWN_HOURS = 4
-
-# ============================================
-# SAFE JSON LOAD
-# ============================================
 
 def load_alerts():
     if not os.path.exists(ALERT_FILE):
         return {}
     try:
         with open(ALERT_FILE, "r") as f:
-            content = f.read().strip()
-            if content == "":
-                return {}
-            return json.loads(content)
+            return json.load(f)
     except:
         return {}
 
 def save_alerts(alerts):
-    try:
-        with open(ALERT_FILE, "w") as f:
-            json.dump(alerts, f)
-    except:
-        pass
+    with open(ALERT_FILE, "w") as f:
+        json.dump(alerts, f)
 
-alert_history = load_alerts()
+alerts = load_alerts()
 
-# ============================================
-# TELEGRAM ALERT FUNCTION
-# ============================================
-
-def send_telegram_once(symbol, message):
-
-    now = datetime.utcnow()
-
-    last = alert_history.get(symbol)
-
-    if last:
-        last_time = datetime.fromisoformat(last)
-        if now - last_time < timedelta(hours=ALERT_COOLDOWN_HOURS):
-            return
+def send_telegram(symbol, score):
+    if symbol in alerts:
+        return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    msg = f"APEX SIGNAL\nSymbol: {symbol}\nScore: {score}"
+
+    payload = {"chat_id": CHAT_ID, "text": msg}
 
     try:
-        r = requests.post(url, data=payload, timeout=10)
-        if r.status_code == 200:
-            alert_history[symbol] = now.isoformat()
-            save_alerts(alert_history)
+        requests.post(url, data=payload)
+        alerts[symbol] = datetime.utcnow().isoformat()
+        save_alerts(alerts)
     except:
         pass
 
-# ============================================
-# AUTO REFRESH
-# ============================================
+st_autorefresh(interval=15000, key="refresh")
 
-st_autorefresh(interval=10000, key="refresh")
-
-# ============================================
-# BYBIT ENDPOINTS (Cloud-safe)
-# ============================================
-
-BYBIT_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
-BTC_URL = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
-
-# ============================================
-# BTC FETCH
-# ============================================
+# USE COINCAP FOR BTC (WORKS ON CLOUD)
 
 def get_btc():
-
     try:
-        r = requests.get(BTC_URL, timeout=10)
-        data = r.json()
+        r = requests.get("https://api.coincap.io/v2/assets/bitcoin")
+        data = r.json()["data"]
 
-        if "result" not in data:
-            return None, None
-
-        btc = data["result"]["list"][0]
-
-        price = float(btc["lastPrice"])
-        change = float(btc["price24hPcnt"]) * 100
+        price = float(data["priceUsd"])
+        change = float(data["changePercent24Hr"])
 
         return price, change
 
@@ -115,82 +64,50 @@ def get_btc():
         st.error(f"BTC fetch error: {e}")
         return None, None
 
-# ============================================
-# REGIME DETECTION
-# ============================================
-
-def detect_regime(change):
-
-    strength = min(abs(change) * 30, 100)
-
-    if change > 2:
-        return "EARLY EXPANSION", "LONG", strength
-
-    elif change < -1:
-        return "EARLY DISTRIBUTION", "SHORT", strength
-
-    else:
-        return "PROPAGATION", "LONG", strength
-
-# ============================================
-# DATA FETCH
-# ============================================
+# USE COINGECKO FOR MARKET DATA (WORKS ON CLOUD)
 
 def get_market():
 
     try:
 
-        r = requests.get(BYBIT_URL, timeout=15)
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={
+                "vs_currency": "usd",
+                "order": "volume_desc",
+                "per_page": 250,
+                "page": 1
+            }
+        )
+
         data = r.json()
-
-        if "result" not in data:
-            st.warning("No market data returned")
-            return pd.DataFrame()
-
-        tickers = data["result"]["list"]
 
         rows = []
 
-        for t in tickers:
+        for coin in data:
 
-            try:
+            symbol = coin["symbol"].upper()
+            change = coin["price_change_percentage_24h"]
+            volume = coin["total_volume"]
 
-                symbol = t["symbol"]
-                change = float(t["price24hPcnt"]) * 100
-                oi = float(t["openInterest"])
+            lag_score = volume / (abs(change) + 1)
 
-                lag_score = oi / (abs(change) + 1)
-
-                rows.append({
-
-                    "Symbol": symbol,
-                    "Change %": round(change, 2),
-                    "Open Interest": oi,
-                    "Lag Score": lag_score
-
-                })
-
-            except:
-                continue
+            rows.append({
+                "Symbol": symbol,
+                "Change %": round(change, 2),
+                "Volume": volume,
+                "Lag Score": lag_score
+            })
 
         df = pd.DataFrame(rows)
 
-        if df.empty:
-            return df
-
-        # Normalize score
         df["Apex Score"] = (
             (df["Lag Score"] - df["Lag Score"].min())
             / (df["Lag Score"].max() - df["Lag Score"].min())
         ) * 100
 
-        df["Apex Score"] = df["Apex Score"].round(1)
-
-        # Grade
         df["Grade"] = df["Apex Score"].apply(
-            lambda x: "A+" if x >= 80 else
-                      "A" if x >= 60 else
-                      "B"
+            lambda x: "A+" if x >= 80 else "A" if x >= 60 else "B"
         )
 
         return df.sort_values("Apex Score", ascending=False)
@@ -200,15 +117,9 @@ def get_market():
         st.error(f"Market fetch error: {e}")
         return pd.DataFrame()
 
-# ============================================
-# MAIN EXECUTION
-# ============================================
-
 btc_price, btc_change = get_btc()
 
-if btc_price is not None:
-
-    regime, bias, strength = detect_regime(btc_change)
+if btc_price:
 
     color = "green" if btc_change > 0 else "red"
 
@@ -217,46 +128,20 @@ if btc_price is not None:
         unsafe_allow_html=True
     )
 
-    st.subheader(f"Regime: {regime} ({bias} favored)")
-
-else:
-
-    st.warning("BTC data unavailable")
-
 df = get_market()
 
 if not df.empty:
 
-    primary = df[df["Grade"] == "A+"].head(10)
-    secondary = df[df["Grade"] != "A+"].head(10)
+    top = df.head(10)
 
-    if bias == "LONG":
+    st.subheader("Top Apex Opportunities")
+    st.dataframe(top)
 
-        st.subheader("Lagging LONG opportunities")
-        st.dataframe(primary)
+    for _, row in top.iterrows():
 
-        st.subheader("Secondary setups")
-        st.dataframe(secondary)
-
-    else:
-
-        st.subheader("Lagging SHORT opportunities")
-        st.dataframe(primary)
-
-        st.subheader("Secondary setups")
-        st.dataframe(secondary)
-
-    # TELEGRAM ALERTS
-
-    for _, row in primary.iterrows():
-
-        if row["Grade"] == "A+" and row["Apex Score"] >= 90:
-
-            send_telegram_once(
-                row["Symbol"],
-                f"APEX SIGNAL\nSymbol: {row['Symbol']}\nGrade: {row['Grade']}\nScore: {row['Apex Score']}"
-            )
+        if row["Grade"] == "A+":
+            send_telegram(row["Symbol"], row["Apex Score"])
 
 else:
 
-    st.warning("Market data empty")
+    st.warning("Market data unavailable")
