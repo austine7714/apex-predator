@@ -3,24 +3,34 @@ import requests
 import pandas as pd
 import json
 import os
-import time
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 
-# ============================
-# TELEGRAM SETTINGS
-# ============================
+# ============================================
+# CONFIG
+# ============================================
 
 BOT_TOKEN = "8334346794:AAE133CpkLqeTbuJhwmJcSUVvMlaQE77Lzg"
 CHAT_ID = "698628907"
 
 ALERT_FILE = "alerted_symbols.json"
+ALERT_BATCH_KEY = "LAST_BATCH_ALERT"
+ALERT_COOLDOWN_MINUTES = 60
 
-ALERT_COOLDOWN_HOURS = 1
+BYBIT_TICKER = "https://api.bybit.com/v5/market/tickers?category=linear"
+BTC_ENDPOINT = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
 
-# ============================
-# SAFE JSON LOAD (PERMANENT FIX)
-# ============================
+# ============================================
+# PAGE SETUP
+# ============================================
+
+st.set_page_config(layout="wide")
+
+st_autorefresh(interval=10000, key="apex_refresh")
+
+# ============================================
+# SAFE ALERT STORAGE
+# ============================================
 
 def load_alerts():
 
@@ -42,7 +52,6 @@ def load_alerts():
 
         return {}
 
-
 def save_alerts(alerts):
 
     try:
@@ -54,94 +63,73 @@ def save_alerts(alerts):
     except:
         pass
 
-
 alert_history = load_alerts()
 
-# ============================
-# TELEGRAM SEND WITH LOCK
-# ============================
+# ============================================
+# TELEGRAM BATCH ALERT
+# ============================================
 
-def send_telegram_once(symbol, message):
+def send_hourly_batch_alert(df, bias, regime):
 
     now = datetime.now()
 
-    last_alert = alert_history.get(symbol)
+    last = alert_history.get(ALERT_BATCH_KEY)
 
-    if last_alert:
+    if last:
 
-        last_time = datetime.fromisoformat(last_alert)
+        last_time = datetime.fromisoformat(last)
 
-        if now - last_time < timedelta(hours=ALERT_COOLDOWN_HOURS):
-            return False
+        if now - last_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES):
+            return
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    longs = df[df["Direction"] == "LONG"]
+    shorts = df[df["Direction"] == "SHORT"]
 
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    longs = longs[longs["Grade"].isin(["A+", "A"])].head(5)
+    shorts = shorts[shorts["Grade"].isin(["A+", "A"])].head(5)
+
+    message = f"APEX HOURLY REPORT\n\nRegime: {regime}\nExecution Bias: {bias}\n\n"
+
+    if not longs.empty:
+
+        message += "LONG SETUPS:\n"
+
+        for _, row in longs.iterrows():
+
+            message += f"{row['Symbol']} | {row['Grade']} | Intent {row['Apex Intent Score']}\n"
+
+    if not shorts.empty:
+
+        message += "\nSHORT SETUPS:\n"
+
+        for _, row in shorts.iterrows():
+
+            message += f"{row['Symbol']} | {row['Grade']} | Intent {row['Apex Intent Score']}\n"
 
     try:
 
-        response = requests.post(url, data=payload, timeout=10)
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": message},
+            timeout=10
+        )
 
-        if response.status_code == 200:
-
-            alert_history[symbol] = now.isoformat()
-            save_alerts(alert_history)
-
-            return True
+        alert_history[ALERT_BATCH_KEY] = now.isoformat()
+        save_alerts(alert_history)
 
     except:
         pass
 
-    return False
-
-
-# ============================
-# AUTO REFRESH (NO FLICKER)
-# ============================
-
-st_autorefresh(interval=5000, key="apexrefresh")
-
-st.set_page_config(layout="wide")
-
-# ============================
-# API ENDPOINTS
-# ============================
-
-BYBIT_URL = "https://api.bytick.com/v5/market/tickers?category=linear"
-BTC_URL = "https://api.bytick.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
-
-# ============================
-# SESSION STATE LOCK
-# ============================
-
-if "startup_sent" not in st.session_state:
-
-    send_telegram_once(
-        "SYSTEM_START",
-        "APEX TERMINAL ULTRA MODE CONNECTED"
-    )
-
-    st.session_state.startup_sent = True
-
-
-if "lag_history" not in st.session_state:
-    st.session_state.lag_history = {}
-
-if "oi_history" not in st.session_state:
-    st.session_state.oi_history = {}
-
-# ============================
-# BTC FUNCTIONS
-# ============================
+# ============================================
+# BTC FETCH
+# ============================================
 
 def get_btc():
 
     try:
 
-        r = requests.get(BTC_URL, timeout=10)
+        r = requests.get(BTC_ENDPOINT, timeout=10)
+
         data = r.json()["result"]["list"][0]
 
         price = float(data["lastPrice"])
@@ -153,258 +141,224 @@ def get_btc():
 
         return None, None
 
+# ============================================
+# BTC REGIME DETECTION
+# ============================================
 
-def detect_btc_regime(change):
+def detect_regime(change):
 
-    strength = min(100, abs(change) * 30)
+    strength = min(abs(change) * 30, 100)
 
     if change > 2:
 
         regime = "EARLY EXPANSION"
-        explanation = "Long propagation favored"
+        explanation = "Strong bullish propagation phase."
         bias = "LONG"
 
-    elif -1 <= change <= 2:
+    elif change < -1:
 
-        regime = "PROPAGATION"
-        explanation = "Best propagation phase"
-        bias = "LONG"
+        regime = "EARLY DISTRIBUTION"
+        explanation = "Strong bearish propagation phase."
+        bias = "SHORT"
 
     else:
 
-        regime = "EARLY DISTRIBUTION"
-        explanation = "Short propagation favored"
-        bias = "SHORT"
+        regime = "PROPAGATION"
+        explanation = "Neutral propagation phase."
+        bias = "LONG"
 
     return regime, explanation, strength, bias
 
+# ============================================
+# PROPAGATION METER
+# ============================================
 
-# ============================
-# APEX CALCULATIONS
-# ============================
+def propagation_meter(df, strength):
 
-def lag_score(oi, change):
+    if df.empty:
+        return 0
 
-    return oi / (abs(change) + 1)
+    aligned = df[df["Grade"] == "A+"]
 
+    score = len(aligned) * 10 + strength
 
-def normalize(df):
+    return min(100, score)
 
-    max_val = df["Lag Score"].max()
-    min_val = df["Lag Score"].min()
+# ============================================
+# MARKET FETCH
+# ============================================
 
-    df["Apex Score"] = (
-        (df["Lag Score"] - min_val) /
-        (max_val - min_val)
-    ) * 100
-
-    df["Apex Score"] = df["Apex Score"].fillna(50).round(1)
-
-    return df
-
-
-def grade(score):
-
-    if score >= 80:
-        return "A+"
-    elif score >= 60:
-        return "A"
-    elif score >= 40:
-        return "B"
-    else:
-        return ""
-
-
-def alignment(change, btc_change):
-
-    if btc_change > 0 and change >= 0:
-        return "LONG"
-
-    if btc_change < 0 and change <= 0:
-        return "SHORT"
-
-    return "MISALIGNED"
-
-
-def propagation_prob(score, align, strength, oi_accel):
-
-    value = score
-
-    if align != "MISALIGNED":
-        value += 10
-
-    if oi_accel > 0:
-        value += 5
-
-    value += strength * 0.2
-
-    return min(100, round(value, 1))
-
-
-# ============================
-# MARKET DATA
-# ============================
-
-def get_data(btc_change, regime, strength, bias):
+def fetch_market():
 
     try:
 
-        r = requests.get(BYBIT_URL, timeout=10)
+        r = requests.get(BYBIT_TICKER, timeout=10)
+
         tickers = r.json()["result"]["list"]
 
-    except:
+        rows = []
 
-        return pd.DataFrame()
+        for coin in tickers:
 
-    rows = []
-    now = datetime.now()
+            symbol = coin["symbol"]
 
-    for t in tickers:
+            change = float(coin["price24hPcnt"]) * 100
 
-        try:
+            oi = float(coin["openInterest"])
 
-            symbol = t["symbol"]
-            oi = float(t["openInterest"])
-            change = float(t["price24hPcnt"]) * 100
+            volume = float(coin["turnover24h"])
 
-            lag = lag_score(oi, change)
-
-            if symbol not in st.session_state.lag_history:
-                st.session_state.lag_history[symbol] = now
-
-            lag_time = (
-                now - st.session_state.lag_history[symbol]
-            ).seconds / 60
-
-            prev_oi = st.session_state.oi_history.get(symbol, oi)
-
-            oi_accel = (
-                ((oi - prev_oi) / prev_oi) * 100
-                if prev_oi else 0
-            )
-
-            st.session_state.oi_history[symbol] = oi
+            lag = oi / (abs(change) + 1)
 
             rows.append({
 
                 "Symbol": symbol,
                 "Price Change %": round(change, 2),
-                "Lag Score": lag,
-                "Lag Persistence": round(lag_time, 1),
-                "OI Accel %": round(oi_accel, 2)
+                "Open Interest": oi,
+                "Volume": volume,
+                "Lag Score": lag
 
             })
 
-        except:
-            continue
+        return pd.DataFrame(rows)
 
-    df = pd.DataFrame(rows)
+    except:
+
+        return pd.DataFrame()
+
+# ============================================
+# PROCESS DATA
+# ============================================
+
+def process(df, btc_change, strength):
 
     if df.empty:
         return df
 
-    df = normalize(df)
+    df["Apex Score"] = (
+        (df["Lag Score"] - df["Lag Score"].min())
+        /
+        (df["Lag Score"].max() - df["Lag Score"].min())
+    ) * 100
+
+    df["Apex Score"] = df["Apex Score"].round(1)
+
+    def grade(score):
+
+        if score >= 80:
+            return "A+"
+        elif score >= 60:
+            return "A"
+        elif score >= 40:
+            return "B"
+        else:
+            return ""
 
     df["Grade"] = df["Apex Score"].apply(grade)
 
-    df["Direction"] = df["Price Change %"].apply(
-        lambda x: alignment(x, btc_change)
-    )
+    def direction(change):
 
-    df["Apex Intent Score"] = df.apply(
-        lambda row: propagation_prob(
-            row["Apex Score"],
-            row["Direction"],
-            strength,
-            row["OI Accel %"]
-        ),
-        axis=1
-    )
+        if btc_change > 0 and change >= 0:
+            return "LONG"
+
+        if btc_change < 0 and change <= 0:
+            return "SHORT"
+
+        return "MISALIGNED"
+
+    df["Direction"] = df["Price Change %"].apply(direction)
+
+    df["Apex Intent Score"] = (
+        df["Apex Score"] + strength * 0.2
+    ).clip(upper=100).round(1)
 
     df = df[df["Grade"] != ""]
 
     df = df.sort_values("Apex Score", ascending=False)
 
-    # ============================
-    # ULTRA PRECISION ALERT (SAFE)
-    # ============================
-
-    for _, row in df.iterrows():
-
-        symbol = row["Symbol"]
-
-        if not (
-            row["Grade"] == "A+"
-            and row["Apex Intent Score"] >= 95
-            and row["Direction"] == bias
-            and row["OI Accel %"] > 0
-        ):
-            continue
-
-        message = f"""
-ULTRA APEX SIGNAL
-
-Symbol: {symbol}
-Grade: {row['Grade']}
-Intent Score: {row['Apex Intent Score']}
-Direction: {row['Direction']}
-Regime: {regime}
-OI Accel: {row['OI Accel %']}%
-
-Highest probability propagation setup detected.
-"""
-
-        send_telegram_once(symbol, message)
-
     return df
 
+# ============================================
+# MAIN DISPLAY
+# ============================================
 
-# ============================
-# DISPLAY
-# ============================
+st.title("APEX PREDATOR TERMINAL")
 
 btc_price, btc_change = get_btc()
 
 if btc_price:
 
-    regime, explanation, strength, bias = detect_btc_regime(btc_change)
+    regime, explanation, strength, bias = detect_regime(btc_change)
 
     color = "#00ff88" if btc_change >= 0 else "#ff4b4b"
 
     st.markdown(
-        f"<h1 style='color:{color}'>BTC ${btc_price:,.0f} ({btc_change:.2f}%)</h1>",
+        f"<h1 style='color:{color};'>BTC ${btc_price:,.0f} ({btc_change:.2f}%)</h1>",
+        unsafe_allow_html=True
+    )
+
+    banner = "#00ff88" if bias == "LONG" else "#ff4b4b"
+
+    st.markdown(
+        f"<div style='background:{banner};padding:15px;border-radius:10px;text-align:center;font-size:24px;font-weight:bold;'>EXECUTION BIAS: {bias}</div>",
         unsafe_allow_html=True
     )
 
     st.markdown(f"### {regime}")
     st.markdown(explanation)
 
-    banner_color = "#00ff88" if bias == "LONG" else "#ff4b4b"
-
-    st.markdown(
-        f"<div style='background:{banner_color};padding:12px;border-radius:10px;font-size:22px;font-weight:bold;text-align:center;'>EXECUTION BIAS: {bias}</div>",
-        unsafe_allow_html=True
-    )
-
 else:
 
-    btc_change = 0
-    regime = "UNKNOWN"
     strength = 50
     bias = "LONG"
+    regime = "UNKNOWN"
+    btc_change = 0
 
+df = fetch_market()
 
-df = get_data(btc_change, regime, strength, bias)
+df = process(df, btc_change, strength)
 
-if not df.empty:
+# ============================================
+# PROPAGATION STRENGTH BAR
+# ============================================
 
-    primary = df[df["Direction"] == bias].head(10)
-    secondary = df[df["Direction"] != bias].head(10)
+prop_strength = propagation_meter(df, strength)
 
-    st.subheader("PRIMARY")
-    st.dataframe(primary, use_container_width=True)
+st.markdown("### PROPAGATION STRENGTH")
+
+st.progress(prop_strength / 100)
+
+st.write(f"{prop_strength}/100")
+
+# ============================================
+# TABLES
+# ============================================
+
+longs = df[df["Direction"] == "LONG"]
+shorts = df[df["Direction"] == "SHORT"]
+
+if bias == "LONG":
+
+    st.markdown("## LONG SETUPS (EXECUTION PRIORITY)")
+    st.dataframe(longs, use_container_width=True)
 
     st.divider()
 
-    st.subheader("SECONDARY")
-    st.dataframe(secondary, use_container_width=True)
+    st.markdown("## SHORT SETUPS")
+    st.dataframe(shorts, use_container_width=True)
+
+else:
+
+    st.markdown("## SHORT SETUPS (EXECUTION PRIORITY)")
+    st.dataframe(shorts, use_container_width=True)
+
+    st.divider()
+
+    st.markdown("## LONG SETUPS")
+    st.dataframe(longs, use_container_width=True)
+
+# ============================================
+# TELEGRAM ALERT
+# ============================================
+
+send_hourly_batch_alert(df, bias, regime)
